@@ -27,7 +27,7 @@ def main():
 
     print(f"Found content in file: '{raw_version}'")
 
-    # Validate Format
+    # Validate format
     # Allows 1.0.0 or 1.0.0-beta.1
     semver_pattern = r"^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$"
     if not re.match(semver_pattern, raw_version):
