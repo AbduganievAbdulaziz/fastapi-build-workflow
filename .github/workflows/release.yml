@@ -71,7 +71,6 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.check-version.outputs.tag }}
-          name: Release ${{ needs.check-version.outputs.tag }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -114,26 +113,22 @@ jobs:
     needs: release
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # <--- This gives permission to delete/create branches
     
     steps:
-      # 1. Authenticate using GitHub App (Requires Secrets)
-      - name: verifix-actions-app-install token
-        id: verifix-actions-app
-        uses: getsentry/action-github-app-token@v2
-        with:
-          app_id: ${{ secrets.APP_ID }}
-          private_key: ${{ secrets.APP_PRIVATE_KEY }}
-
-      # 2. Checkout using the App Token
+      # 1. Checkout using the App Token
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ steps.verifix-actions-app.outputs.token }}
           fetch-depth: 0 # Important: Fetch all history so we can switch branches easily
 
-      # 3. Delete old branch
+      # 2. Delete old branch
       - name: Delete existing patch branch
         run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
           # Check if the branch 'patch' exists on the remote
           if git ls-remote --exit-code --heads origin patch; then
             git push origin --delete patch
@@ -150,7 +145,7 @@ jobs:
             echo "Remote branch 'patch' not found. Skipping deletion."
           fi
 
-      # 4. Create new branch from main
+      # 3. Create new branch from main
       - name: Create new patch branch from main
         run: |
           git checkout main
