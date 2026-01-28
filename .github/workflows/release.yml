@@ -1,0 +1,160 @@
+name: FastAPI Release and Docker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'VERSION.md'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # --------------------------------------------------
+  # JOB 1: Read Version
+  # --------------------------------------------------
+  check-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      # This maps the output from the python script step to the job output
+      version: ${{ steps.reader.outputs.version }}
+      tag: ${{ steps.reader.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Run Read Version Script
+        id: reader
+        # This runs your script. The script writes to GITHUB_OUTPUT.
+        # The 'id: reader' allows us to reference it later.
+        run: python .github/scripts/read_version.py
+
+      - name: Check if Tag Exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG_NAME="${{ steps.reader.outputs.tag }}"
+          # Checks if release already exists on GitHub
+          if gh release view "$TAG_NAME" &>/dev/null; then
+            echo "Error: Tag $TAG_NAME already exists!"
+            exit 1
+          else
+            echo "Tag $TAG_NAME is new. Proceeding..."
+          fi
+
+  # --------------------------------------------------
+  # JOB 2: Release and Docker
+  # --------------------------------------------------
+  release:
+    needs: check-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Needed to create releases
+      packages: write  # Needed to push docker images
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # --- GIT RELEASE ---
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.check-version.outputs.tag }}
+          name: Release ${{ needs.check-version.outputs.tag }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # --- DOCKER BUILD ---
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # This generates tags: latest, 1.0.0, 1.0, 1
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.check-version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.check-version.outputs.version }}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # --------------------------------------------------
+  # JOB 3: Update Patch Branch
+  # --------------------------------------------------
+  update-patch-branch:
+    # This ensures it only runs after the release is successful
+    needs: release
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. Authenticate using GitHub App (Requires Secrets)
+      - name: verifix-actions-app-install token
+        id: verifix-actions-app
+        uses: getsentry/action-github-app-token@v2
+        with:
+          app_id: ${{ secrets.APP_ID }}
+          private_key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      # 2. Checkout using the App Token
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.verifix-actions-app.outputs.token }}
+          fetch-depth: 0 # Important: Fetch all history so we can switch branches easily
+
+      # 3. Delete old branch
+      - name: Delete existing patch branch
+        run: |
+          # Check if the branch 'patch' exists on the remote
+          if git ls-remote --exit-code --heads origin patch; then
+            git push origin --delete patch
+            echo "Deleted remote branch 'patch'"
+          
+            # Check if the local branch 'patch' exists
+            if git show-ref --verify --quiet "refs/heads/patch"; then
+              git branch -D patch
+              echo "Deleted local branch 'patch'"
+            else
+              echo "Local branch 'patch' not found. Skipping local deletion."
+            fi
+          else
+            echo "Remote branch 'patch' not found. Skipping deletion."
+          fi
+
+      # 4. Create new branch from main
+      - name: Create new patch branch from main
+        run: |
+          git checkout main
+          git pull origin main
+          git reset --hard origin/main
+          git checkout -b patch
+          git push origin patch
